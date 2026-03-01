@@ -2,16 +2,17 @@ import { Hono } from 'hono';
 import { supabase } from '../lib/db.js';
 import {
   getOrCreateCustomer,
-  createSetupIntent,
+  createCheckoutSession,
+  retrieveCheckoutSession,
+  retrieveSetupIntent,
   retrievePaymentMethod,
-  attachPaymentMethod,
   detachPaymentMethod,
 } from '../lib/stripe.js';
 import type { Env } from '../types/index.js';
 
 const paymentMethods = new Hono<Env>();
 
-// POST /v1/payment-methods/setup — create a SetupIntent for collecting card details
+// POST /v1/payment-methods/setup — create a Checkout Session for saving a card
 paymentMethods.post('/setup', async (c) => {
   const accountId = c.get('account_id');
 
@@ -36,86 +37,11 @@ paymentMethods.post('/setup', async (c) => {
   }
 
   const customerId = await getOrCreateCustomer(accountId, account.email);
-  const { client_secret, setup_intent_id } = await createSetupIntent(customerId);
+  const { url, id } = await createCheckoutSession(customerId, accountId);
 
   return c.json({
-    setup_intent_id,
-    client_secret,
-    publishable_key: process.env.STRIPE_PUBLISHABLE_KEY || '',
-  });
-});
-
-// POST /v1/payment-methods/confirm — confirm and save a payment method
-paymentMethods.post('/confirm', async (c) => {
-  const accountId = c.get('account_id');
-  const body = await c.req.json<{
-    setup_intent_id: string;
-    payment_method_id: string;
-  }>();
-
-  if (!body.setup_intent_id || !body.payment_method_id) {
-    return c.json(
-      {
-        error: {
-          code: 'INVALID_REQUEST',
-          message: 'setup_intent_id and payment_method_id are required',
-          request_id: c.get('request_id'),
-        },
-      },
-      400
-    );
-  }
-
-  // Get account and Stripe customer
-  const { data: account } = await supabase
-    .from('accounts')
-    .select('email, stripe_customer_id')
-    .eq('id', accountId)
-    .single();
-
-  if (!account?.stripe_customer_id) {
-    return c.json(
-      {
-        error: {
-          code: 'INVALID_REQUEST',
-          message: 'No Stripe customer found. Call /setup first.',
-          request_id: c.get('request_id'),
-        },
-      },
-      400
-    );
-  }
-
-  // Retrieve the payment method from Stripe to get card details
-  const pm = await retrievePaymentMethod(body.payment_method_id);
-  const card = pm.card;
-
-  // Attach the payment method to the customer
-  await attachPaymentMethod(account.stripe_customer_id, body.payment_method_id);
-
-  // Unset any previous default payment methods for this account
-  await supabase
-    .from('payment_methods')
-    .update({ is_default: false })
-    .eq('account_id', accountId);
-
-  // Save the new payment method as default
-  await supabase.from('payment_methods').insert({
-    account_id: accountId,
-    stripe_payment_method_id: body.payment_method_id,
-    last4: card?.last4 || null,
-    brand: card?.brand || null,
-    exp_month: card?.exp_month || null,
-    exp_year: card?.exp_year || null,
-    is_default: true,
-  });
-
-  return c.json({
-    payment_method_id: body.payment_method_id,
-    brand: card?.brand || null,
-    last4: card?.last4 || null,
-    exp_month: card?.exp_month || null,
-    exp_year: card?.exp_year || null,
+    checkout_url: url,
+    session_id: id,
   });
 });
 
@@ -175,3 +101,87 @@ paymentMethods.delete('/:id', async (c) => {
 });
 
 export default paymentMethods;
+
+/**
+ * Unauthenticated callback routes for Stripe Checkout redirects.
+ * These must be mounted BEFORE auth middleware.
+ */
+export const paymentMethodCallbacks = new Hono<Env>();
+
+// GET /v1/payment-methods/complete — Stripe redirect after successful card setup
+paymentMethodCallbacks.get('/complete', async (c) => {
+  const sessionId = c.req.query('session_id');
+  if (!sessionId) {
+    return c.html('<html><body><h1>Error</h1><p>Missing session_id.</p></body></html>', 400);
+  }
+
+  // Retrieve the Checkout Session
+  const session = await retrieveCheckoutSession(sessionId);
+
+  // Get the payment method from the SetupIntent
+  const setupIntentId = typeof session.setup_intent === 'string'
+    ? session.setup_intent
+    : session.setup_intent?.id;
+
+  if (!setupIntentId) {
+    return c.html('<html><body><h1>Error</h1><p>No setup intent found on session.</p></body></html>', 400);
+  }
+
+  // Retrieve the SetupIntent to get the payment method
+  const setupIntent = await retrieveSetupIntent(setupIntentId);
+
+  const paymentMethodId = typeof setupIntent.payment_method === 'string'
+    ? setupIntent.payment_method
+    : setupIntent.payment_method?.id;
+
+  if (!paymentMethodId) {
+    return c.html('<html><body><h1>Error</h1><p>No payment method found.</p></body></html>', 400);
+  }
+
+  // Retrieve card details
+  const pm = await retrievePaymentMethod(paymentMethodId);
+  const card = pm.card;
+
+  // Look up account_id from session metadata
+  const accountId = session.metadata?.account_id;
+  if (!accountId) {
+    return c.html('<html><body><h1>Error</h1><p>Missing account information.</p></body></html>', 400);
+  }
+
+  // Unset previous default payment methods
+  await supabase
+    .from('payment_methods')
+    .update({ is_default: false })
+    .eq('account_id', accountId);
+
+  // Save the new payment method as default
+  await supabase.from('payment_methods').insert({
+    account_id: accountId,
+    stripe_payment_method_id: paymentMethodId,
+    last4: card?.last4 || null,
+    brand: card?.brand || null,
+    exp_month: card?.exp_month || null,
+    exp_year: card?.exp_year || null,
+    is_default: true,
+  });
+
+  // Update accounts.stripe_customer_id if not already set
+  const customerId = typeof session.customer === 'string'
+    ? session.customer
+    : session.customer?.id;
+
+  if (customerId) {
+    await supabase
+      .from('accounts')
+      .update({ stripe_customer_id: customerId })
+      .eq('id', accountId)
+      .is('stripe_customer_id', null);
+  }
+
+  return c.html('<html><body><h1>Payment method saved.</h1><p>You can close this tab.</p></body></html>');
+});
+
+// GET /v1/payment-methods/cancelled — Stripe redirect after cancelled setup
+paymentMethodCallbacks.get('/cancelled', (c) => {
+  return c.html('<html><body><h1>Cancelled.</h1><p>No changes were made. You can close this tab.</p></body></html>');
+});

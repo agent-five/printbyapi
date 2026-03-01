@@ -35,18 +35,40 @@ export async function getOrCreateCustomer(accountId: string, email: string): Pro
 }
 
 /**
- * Create a SetupIntent so the client can collect card details.
+ * Create a Checkout Session in 'setup' mode so the user can save a card.
  */
-export async function createSetupIntent(customerId: string): Promise<{ client_secret: string; setup_intent_id: string }> {
-  const setupIntent = await stripe.setupIntents.create({
-    customer: customerId,
+export async function createCheckoutSession(
+  customerId: string,
+  accountId: string
+): Promise<{ url: string; id: string }> {
+  const session = await stripe.checkout.sessions.create({
+    mode: 'setup',
     payment_method_types: ['card'],
+    customer: customerId,
+    success_url:
+      process.env.STRIPE_SUCCESS_URL ||
+      'https://api.printbyapi.com/v1/payment-methods/complete?session_id={CHECKOUT_SESSION_ID}',
+    cancel_url:
+      process.env.STRIPE_CANCEL_URL ||
+      'https://api.printbyapi.com/v1/payment-methods/cancelled',
+    metadata: { account_id: accountId },
   });
 
-  return {
-    client_secret: setupIntent.client_secret!,
-    setup_intent_id: setupIntent.id,
-  };
+  return { url: session.url!, id: session.id };
+}
+
+/**
+ * Retrieve a Checkout Session by ID.
+ */
+export async function retrieveCheckoutSession(sessionId: string): Promise<Stripe.Checkout.Session> {
+  return stripe.checkout.sessions.retrieve(sessionId);
+}
+
+/**
+ * Retrieve a SetupIntent by ID.
+ */
+export async function retrieveSetupIntent(setupIntentId: string): Promise<Stripe.SetupIntent> {
+  return stripe.setupIntents.retrieve(setupIntentId);
 }
 
 /**

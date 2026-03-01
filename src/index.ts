@@ -9,7 +9,7 @@ import quotes from './routes/quotes.js';
 import orders from './routes/orders.js';
 import webhooks from './routes/webhooks.js';
 import keys from './routes/keys.js';
-import paymentMethods from './routes/payment-methods.js';
+import paymentMethods, { paymentMethodCallbacks } from './routes/payment-methods.js';
 import type { Env } from './types/index.js';
 
 const app = new Hono<Env>();
@@ -24,6 +24,10 @@ app.use('*', async (c, next) => {
 
 // Health check (no auth required)
 app.get('/health', (c) => c.json({ status: 'ok', timestamp: new Date().toISOString() }));
+
+// Unauthenticated payment method callbacks (Stripe Checkout redirects)
+// Must be mounted BEFORE auth middleware
+app.route('/v1/payment-methods', paymentMethodCallbacks);
 
 // All /v1 routes require auth + rate limiting
 const v1 = new Hono<Env>();
