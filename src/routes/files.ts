@@ -1,9 +1,8 @@
 import { Hono } from 'hono';
 import { randomUUID } from 'crypto';
-import { writeFile, mkdir } from 'fs/promises';
-import { join } from 'path';
 import { supabase } from '../lib/db.js';
 import { parseStl } from '../lib/geometry.js';
+import { uploadFile } from '../lib/storage.js';
 import type { Env } from '../types/index.js';
 
 const SUPPORTED_FORMATS = ['stl', 'obj', '3mf'];
@@ -131,13 +130,15 @@ files.post('/', async (c) => {
     );
   }
 
-  // Store file locally (TODO: Replace with R2/S3 upload)
   const fileId = randomUUID();
-  const storageKey = `${accountId}/${fileId}.${ext}`;
-  const storagePath = process.env.FILE_STORAGE_PATH || './uploads';
-  const dirPath = join(storagePath, accountId);
-  await mkdir(dirPath, { recursive: true });
-  await writeFile(join(storagePath, storageKey), fileBuffer);
+  const storageKey = `files/${accountId}/${fileId}.${ext}`;
+
+  const mimeTypes: Record<string, string> = {
+    stl: 'model/stl',
+    obj: 'model/obj',
+    '3mf': 'model/3mf',
+  };
+  await uploadFile(storageKey, fileBuffer, mimeTypes[ext] || 'application/octet-stream');
 
   // Parse geometry for STL files
   let volumeCm3: number | null = null;
