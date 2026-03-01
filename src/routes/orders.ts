@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { supabase } from '../lib/db.js';
 import { dispatchWebhook } from '../lib/webhooks.js';
-import { createPaymentIntent } from '../lib/stripe.js';
+import { getOrCreateCustomer, chargeOrder, refundOrder } from '../lib/stripe.js';
 import type { Env } from '../types/index.js';
 
 const orders = new Hono<Env>();
@@ -98,11 +98,58 @@ orders.post('/', async (c) => {
     );
   }
 
-  // TODO: Create Stripe payment intent
-  const paymentIntentId = await createPaymentIntent(
-    Number(quote.total_usd),
-    accountId
-  );
+  // Check for a default payment method
+  const { data: defaultPm } = await supabase
+    .from('payment_methods')
+    .select('id')
+    .eq('account_id', accountId)
+    .eq('is_default', true)
+    .single();
+
+  if (!defaultPm) {
+    return c.json(
+      {
+        error: {
+          code: 'NO_PAYMENT_METHOD',
+          message: 'Add a payment method before placing orders',
+          request_id: c.get('request_id'),
+        },
+      },
+      402
+    );
+  }
+
+  // Get account email for Stripe customer lookup
+  const { data: account } = await supabase
+    .from('accounts')
+    .select('email')
+    .eq('id', accountId)
+    .single();
+
+  // Get or create Stripe customer
+  const customerId = await getOrCreateCustomer(accountId, account!.email);
+
+  // Charge via PaymentIntent
+  const amountCents = Math.round(Number(quote.total_usd) * 100);
+  let paymentIntent;
+  try {
+    paymentIntent = await chargeOrder(customerId, amountCents, body.quote_id, {
+      account_id: accountId,
+      quote_id: body.quote_id,
+    });
+  } catch (err: any) {
+    const message = err?.message || 'Payment failed';
+    return c.json(
+      {
+        error: {
+          code: 'PAYMENT_FAILED',
+          message,
+          request_id: c.get('request_id'),
+        },
+      },
+      402
+    );
+  }
 
   // Create order
   const { data: order, error } = await supabase
@@ -112,7 +159,7 @@ orders.post('/', async (c) => {
       quote_id: quote.id,
       idempotency_key: body.idempotency_key || null,
       status: 'confirmed',
-      stripe_payment_intent_id: paymentIntentId,
+      stripe_payment_intent_id: paymentIntent.id,
     })
     .select()
     .single();
@@ -155,6 +202,95 @@ orders.post('/', async (c) => {
     },
     201
   );
+});
+
+// POST /v1/orders/:id/refund — admin-only refund
+orders.post('/:id/refund', async (c) => {
+  // Admin auth: check for ADMIN_API_KEY
+  const authHeader = c.req.header('Authorization');
+  const apiKey = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : '';
+  const adminKey = process.env.ADMIN_API_KEY;
+
+  if (!adminKey || apiKey !== adminKey) {
+    return c.json(
+      {
+        error: {
+          code: 'UNAUTHORIZED',
+          message: 'Admin access required',
+          request_id: c.get('request_id'),
+        },
+      },
+      403
+    );
+  }
+
+  const orderId = c.req.param('id');
+
+  const { data: order } = await supabase
+    .from('orders')
+    .select('*')
+    .eq('id', orderId)
+    .single();
+
+  if (!order) {
+    return c.json(
+      {
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Order not found',
+          request_id: c.get('request_id'),
+        },
+      },
+      404
+    );
+  }
+
+  if (!order.stripe_payment_intent_id) {
+    return c.json(
+      {
+        error: {
+          code: 'INVALID_REQUEST',
+          message: 'Order has no payment intent to refund',
+          request_id: c.get('request_id'),
+        },
+      },
+      400
+    );
+  }
+
+  try {
+    await refundOrder(order.stripe_payment_intent_id);
+  } catch (err: any) {
+    return c.json(
+      {
+        error: {
+          code: 'INVALID_REQUEST',
+          message: err?.message || 'Refund failed',
+          request_id: c.get('request_id'),
+        },
+      },
+      400
+    );
+  }
+
+  // Update order status to cancelled
+  await supabase
+    .from('orders')
+    .update({ status: 'cancelled', updated_at: new Date().toISOString() })
+    .eq('id', orderId);
+
+  // Add order event
+  await supabase.from('order_events').insert({
+    order_id: orderId,
+    status: 'cancelled',
+    note: 'Order refunded',
+  });
+
+  return c.json({
+    order_id: formatId(orderId, 'order'),
+    status: 'cancelled',
+    refunded: true,
+  });
 });
 
 orders.get('/:id', async (c) => {

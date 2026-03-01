@@ -105,6 +105,18 @@ export interface Webhook {
   created_at: string;
 }
 
+export interface PaymentMethod {
+  id: string;
+  account_id: string;
+  stripe_payment_method_id: string;
+  last4: string | null;
+  brand: string | null;
+  exp_month: number | null;
+  exp_year: number | null;
+  is_default: boolean;
+  created_at: string;
+}
+
 export type ErrorCode =
   | 'UNAUTHORIZED'
   | 'INVALID_REQUEST'
@@ -113,7 +125,9 @@ export type ErrorCode =
   | 'FILE_TOO_LARGE'
   | 'UNSUPPORTED_FORMAT'
   | 'IDEMPOTENCY_CONFLICT'
-  | 'RATE_LIMITED';
+  | 'RATE_LIMITED'
+  | 'NO_PAYMENT_METHOD'
+  | 'PAYMENT_FAILED';
 
 export interface ApiError {
   error: {

@@ -9,6 +9,7 @@ import quotes from './routes/quotes.js';
 import orders from './routes/orders.js';
 import webhooks from './routes/webhooks.js';
 import keys from './routes/keys.js';
+import paymentMethods from './routes/payment-methods.js';
 import type { Env } from './types/index.js';
 
 const app = new Hono<Env>();
@@ -34,6 +35,7 @@ v1.route('/quotes', quotes);
 v1.route('/orders', orders);
 v1.route('/webhooks', webhooks);
 v1.route('/keys', keys);
+v1.route('/payment-methods', paymentMethods);
 
 app.route('/v1', v1);
 
