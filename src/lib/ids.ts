@@ -12,28 +12,28 @@ async function resolveId(
   table: string,
   accountId?: string
 ): Promise<string | null> {
-  // Full UUID — use as-is
   if (UUID_RE.test(displayOrUuid)) {
     return displayOrUuid;
   }
 
-  // Display ID — extract suffix and look up
   const match = displayOrUuid.match(DISPLAY_ID_RE);
   if (!match) return null;
-
   const suffix = match[1].toLowerCase();
 
-  let query = supabase
-    .from(table)
-    .select('id')
-    .filter('id::text', 'ilike', `%${suffix}`);
-
+  // PostgREST doesn't support casts in filter column names, so fetch
+  // IDs for this account and match suffix in JS. Fine for MVP scale.
+  let query = (supabase as any).from(table).select('id');
   if (accountId) {
     query = query.eq('account_id', accountId);
   }
 
-  const { data } = await query.limit(1).single();
-  return data?.id ?? null;
+  const { data } = await query;
+  if (!data) return null;
+
+  const row = (data as Array<{ id: string }>).find((r) =>
+    r.id.replace(/-/g, '').endsWith(suffix)
+  );
+  return row?.id ?? null;
 }
 
 export async function resolveFileId(
