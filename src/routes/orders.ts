@@ -2,13 +2,10 @@ import { Hono } from 'hono';
 import { supabase } from '../lib/db.js';
 import { dispatchWebhook } from '../lib/webhooks.js';
 import { getOrCreateCustomer, chargeOrder, refundOrder } from '../lib/stripe.js';
+import { formatId, resolveQuoteId, resolveOrderId } from '../lib/ids.js';
 import type { Env } from '../types/index.js';
 
 const orders = new Hono<Env>();
-
-function formatId(uuid: string, prefix: string): string {
-  return prefix + '_' + uuid.replace(/-/g, '').slice(-8);
-}
 
 orders.post('/', async (c) => {
   const accountId = c.get('account_id');
@@ -30,6 +27,21 @@ orders.post('/', async (c) => {
     );
   }
 
+  // Resolve quote_id (accept display ID or full UUID)
+  const quoteId = await resolveQuoteId(body.quote_id, accountId);
+  if (!quoteId) {
+    return c.json(
+      {
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Quote not found',
+          request_id: c.get('request_id'),
+        },
+      },
+      404
+    );
+  }
+
   // Check idempotency key — return existing order if duplicate
   if (body.idempotency_key) {
     const { data: existing } = await supabase
@@ -41,7 +53,7 @@ orders.post('/', async (c) => {
 
     if (existing) {
       // Verify it matches the same quote
-      if (existing.quote_id !== body.quote_id) {
+      if (existing.quote_id !== quoteId) {
         return c.json(
           {
             error: {
@@ -67,7 +79,7 @@ orders.post('/', async (c) => {
   const { data: quote } = await supabase
     .from('quotes')
     .select('*')
-    .eq('id', body.quote_id)
+    .eq('id', quoteId)
     .eq('account_id', accountId)
     .single();
 
@@ -133,9 +145,9 @@ orders.post('/', async (c) => {
   const amountCents = Math.round(Number(quote.total_usd) * 100);
   let paymentIntent;
   try {
-    paymentIntent = await chargeOrder(customerId, amountCents, body.quote_id, {
+    paymentIntent = await chargeOrder(customerId, amountCents, quoteId, {
       account_id: accountId,
-      quote_id: body.quote_id,
+      quote_id: quoteId,
     });
   } catch (err: any) {
     const message = err?.message || 'Payment failed';
@@ -224,7 +236,20 @@ orders.post('/:id/refund', async (c) => {
     );
   }
 
-  const orderId = c.req.param('id');
+  const orderId = await resolveOrderId(c.req.param('id'));
+
+  if (!orderId) {
+    return c.json(
+      {
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Order not found',
+          request_id: c.get('request_id'),
+        },
+      },
+      404
+    );
+  }
 
   const { data: order } = await supabase
     .from('orders')
@@ -295,7 +320,20 @@ orders.post('/:id/refund', async (c) => {
 
 orders.get('/:id', async (c) => {
   const accountId = c.get('account_id');
-  const orderId = c.req.param('id');
+  const orderId = await resolveOrderId(c.req.param('id'), accountId);
+
+  if (!orderId) {
+    return c.json(
+      {
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Order not found',
+          request_id: c.get('request_id'),
+        },
+      },
+      404
+    );
+  }
 
   const { data: order } = await supabase
     .from('orders')

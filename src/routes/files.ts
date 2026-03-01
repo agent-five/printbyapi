@@ -3,16 +3,13 @@ import { randomUUID } from 'crypto';
 import { supabase } from '../lib/db.js';
 import { parseStl } from '../lib/geometry.js';
 import { uploadFile } from '../lib/storage.js';
+import { formatId } from '../lib/ids.js';
 import type { Env } from '../types/index.js';
 
 const SUPPORTED_FORMATS = ['stl', 'obj', '3mf'];
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
 
 const files = new Hono<Env>();
-
-function formatId(uuid: string, prefix: string): string {
-  return prefix + '_' + uuid.replace(/-/g, '').slice(-8);
-}
 
 files.post('/', async (c) => {
   const accountId = c.get('account_id');

@@ -1,22 +1,13 @@
 import { Hono } from 'hono';
 import { supabase } from '../lib/db.js';
 import { calculateQuote } from '../lib/pricing.js';
+import { formatId, resolveFileId, resolveQuoteId } from '../lib/ids.js';
 import type { Env, Material, ShipTo } from '../types/index.js';
 
 const VALID_MATERIALS: Material[] = ['pla', 'petg', 'abs', 'resin'];
 const QUOTE_TTL_MINUTES = 15;
 
 const quotes = new Hono<Env>();
-
-function formatId(uuid: string, prefix: string): string {
-  return prefix + '_' + uuid.replace(/-/g, '').slice(-8);
-}
-
-function resolveUuid(prefixedId: string): string {
-  // If it's a prefixed ID (e.g. file_a1b2c3d4), we can't reverse it.
-  // The caller should use the full UUID. We'll try both.
-  return prefixedId;
-}
 
 quotes.post('/', async (c) => {
   const accountId = c.get('account_id');
@@ -84,11 +75,26 @@ quotes.post('/', async (c) => {
     );
   }
 
+  // Resolve file_id (accept display ID or full UUID)
+  const fileId = await resolveFileId(body.file_id, accountId);
+  if (!fileId) {
+    return c.json(
+      {
+        error: {
+          code: 'NOT_FOUND',
+          message: 'File not found or does not belong to this account',
+          request_id: c.get('request_id'),
+        },
+      },
+      404
+    );
+  }
+
   // Look up file — verify it belongs to this account
   const { data: file } = await supabase
     .from('files')
     .select('*')
-    .eq('id', body.file_id)
+    .eq('id', fileId)
     .eq('account_id', accountId)
     .single();
 
@@ -179,7 +185,20 @@ quotes.post('/', async (c) => {
 
 quotes.get('/:id', async (c) => {
   const accountId = c.get('account_id');
-  const quoteId = c.req.param('id');
+  const quoteId = await resolveQuoteId(c.req.param('id'), accountId);
+
+  if (!quoteId) {
+    return c.json(
+      {
+        error: {
+          code: 'NOT_FOUND',
+          message: 'Quote not found',
+          request_id: c.get('request_id'),
+        },
+      },
+      404
+    );
+  }
 
   const { data: quote } = await supabase
     .from('quotes')
